@@ -2,7 +2,8 @@ use chrono::{DateTime, Utc};
 use http::header::HeaderMap;
 use url::Url;
 use std::collections::HashMap;
-use sha256::{digest};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
 
 const SHORT_DATE: &str = "%Y%m%d";
 const LONG_DATETIME: &str = "%Y%m%dT%H%M%SZ";
@@ -133,10 +134,8 @@ where
     pub fn sign(&'a self) -> String {
         let canonical = self.canonical_request();
         let string_to_sign = string_to_sign(self.datetime, self.region, &canonical, self.service);
-        let signing_key = signing_key(self.datetime, self.secret_key, self.region, self.service);
-        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &signing_key.unwrap());
-        let tag = ring::hmac::sign(&key, string_to_sign.as_bytes());
-        let signature = hex::encode(tag.as_ref());
+        let signing_key = signing_key(self.datetime, self.secret_key, self.region, self.service).unwrap();
+        let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign).unwrap());
         let signed_headers = self.signed_header_string();
 
         format!(
@@ -190,12 +189,11 @@ pub fn scope_string(datetime: &DateTime<Utc>, region: &str, service: &str) -> St
 }
 
 pub fn string_to_sign(datetime: &DateTime<Utc>, region: &str, canonical_req: &str, service: &str) -> String {
-    let hash = ring::digest::digest(&ring::digest::SHA256, canonical_req.as_bytes());
     format!(
         "AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{hash}",
         timestamp = datetime.format(LONG_DATETIME),
         scope = scope_string(datetime, region, service),
-        hash = hex::encode(hash.as_ref())
+        hash = digest(canonical_req.as_bytes())
     )
 }
 
@@ -207,21 +205,20 @@ pub fn signing_key(
 ) -> Result<Vec<u8>, String> {
     let secret = String::from("AWS4") + secret_key;
 
-    let date_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
-    let date_tag = ring::hmac::sign(
-        &date_key,
-        datetime.format(SHORT_DATE).to_string().as_bytes(),
-    );
+    let date_key = hmac_sha256(secret.as_bytes(), datetime.format(SHORT_DATE).to_string().as_bytes())?;
+    let region_key = hmac_sha256(&date_key, region.to_string().as_bytes())?;
+    let service_key = hmac_sha256(&region_key, service.as_bytes())?;
+    hmac_sha256(&service_key, b"aws4_request")
+}
 
-    let region_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, date_tag.as_ref());
-    let region_tag = ring::hmac::sign(&region_key, region.to_string().as_bytes());
+fn hmac_sha256(key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<Vec<u8>, String> {
+    let mut hmac = Hmac::<Sha256>::new_from_slice(key.as_ref()).map_err(|e| e.to_string())?;
+    hmac.update(value.as_ref());
+    Ok(hmac.finalize().into_bytes().to_vec())
+}
 
-    let service_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, region_tag.as_ref());
-    let service_tag = ring::hmac::sign(&service_key, service.as_bytes());
-
-    let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, service_tag.as_ref());
-    let signing_tag = ring::hmac::sign(&signing_key, b"aws4_request");
-    Ok(signing_tag.as_ref().to_vec())
+fn digest(input: impl AsRef<[u8]>) -> String {
+    hex::encode(Sha256::digest(input).as_slice())
 }
 
 

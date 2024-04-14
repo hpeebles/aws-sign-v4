@@ -1,12 +1,11 @@
-use chrono::{DateTime, Utc};
-use http::header::HeaderMap;
-use url::Url;
-use std::collections::HashMap;
 use hmac::{Hmac, Mac};
+use http::header::HeaderMap;
 use sha2::{Digest, Sha256};
-
-const SHORT_DATE: &str = "%Y%m%d";
-const LONG_DATETIME: &str = "%Y%m%dT%H%M%SZ";
+use std::collections::HashMap;
+use time::format_description::BorrowedFormatItem;
+use time::macros::format_description;
+use time::OffsetDateTime;
+use url::Url;
 
 #[derive(Debug)]
 pub struct AwsSign<'a, T: 'a>
@@ -15,7 +14,7 @@ where
 {
     method: &'a str,
     url: Url,
-    datetime: &'a DateTime<Utc>,
+    datetime: &'a OffsetDateTime,
     region: &'a str,
     access_key: &'a str,
     secret_key: &'a str,
@@ -59,7 +58,7 @@ impl<'a> AwsSign<'a, HashMap<String, String>> {
     pub fn new<B: AsRef<[u8]> + ?Sized>(
         method: &'a str,
         url: &'a str,
-        datetime: &'a DateTime<Utc>,
+        datetime: &'a OffsetDateTime,
         headers: &'a HeaderMap,
         region: &'a str,
         access_key: &'a str,
@@ -135,7 +134,7 @@ where
         let canonical = self.canonical_request();
         let string_to_sign = string_to_sign(self.datetime, self.region, &canonical, self.service);
         let signing_key = signing_key(self.datetime, self.secret_key, self.region, self.service).unwrap();
-        let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign).unwrap());
+        let signature = hex::encode(hmac_sha256(signing_key, string_to_sign).unwrap());
         let signed_headers = self.signed_header_string();
 
         format!(
@@ -179,36 +178,36 @@ pub fn canonical_query_string(uri: &Url) -> String {
     keyvalues.join("&")
 }
 
-pub fn scope_string(datetime: &DateTime<Utc>, region: &str, service: &str) -> String {
+pub fn scope_string(datetime: &OffsetDateTime, region: &str, service: &str) -> String {
     format!(
         "{date}/{region}/{service}/aws4_request",
-        date = datetime.format(SHORT_DATE),
+        date = format_as_short_date(datetime),
         region = region,
         service = service
     )
 }
 
-pub fn string_to_sign(datetime: &DateTime<Utc>, region: &str, canonical_req: &str, service: &str) -> String {
+pub fn string_to_sign(datetime: &OffsetDateTime, region: &str, canonical_req: &str, service: &str) -> String {
     format!(
         "AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{hash}",
-        timestamp = datetime.format(LONG_DATETIME),
+        timestamp = format_as_long_datetime(datetime),
         scope = scope_string(datetime, region, service),
         hash = digest(canonical_req.as_bytes())
     )
 }
 
 pub fn signing_key(
-    datetime: &DateTime<Utc>,
+    datetime: &OffsetDateTime,
     secret_key: &str,
     region: &str,
     service: &str,
 ) -> Result<Vec<u8>, String> {
     let secret = String::from("AWS4") + secret_key;
 
-    let date_key = hmac_sha256(secret.as_bytes(), datetime.format(SHORT_DATE).to_string().as_bytes())?;
-    let region_key = hmac_sha256(&date_key, region.to_string().as_bytes())?;
-    let service_key = hmac_sha256(&region_key, service.as_bytes())?;
-    hmac_sha256(&service_key, b"aws4_request")
+    let date_key = hmac_sha256(secret.as_bytes(), format_as_short_date(datetime).as_bytes())?;
+    let region_key = hmac_sha256(date_key, region.to_string().as_bytes())?;
+    let service_key = hmac_sha256(region_key, service.as_bytes())?;
+    hmac_sha256(service_key, b"aws4_request")
 }
 
 fn hmac_sha256(key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<Vec<u8>, String> {
@@ -221,6 +220,16 @@ fn digest(input: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(input).as_slice())
 }
 
+const SHORT_DATE: &[BorrowedFormatItem] = format_description!("[year][month][day]");
+const LONG_DATETIME: &[BorrowedFormatItem] = format_description!("[year][month][day]T[hour][minute][second]Z");
+
+fn format_as_short_date(datetime: &OffsetDateTime) -> String {
+    datetime.format(&SHORT_DATE).unwrap()
+}
+
+fn format_as_long_datetime(datetime: &OffsetDateTime) -> String {
+    datetime.format(&LONG_DATETIME).unwrap()
+}
 
 #[cfg(test)]
 mod tests {
@@ -228,7 +237,7 @@ mod tests {
 
     #[test]
     fn sample_canonical_request() {
-        let datetime = chrono::Utc::now();
+        let datetime = time::OffsetDateTime::now_utc();
         let url: &str = "https://hi.s3.us-east-1.amazonaws.com/Prod/graphql";
         let map: HeaderMap = HeaderMap::new();
         let aws_sign = AwsSign::new(
@@ -248,7 +257,7 @@ mod tests {
 
     #[test]
     fn sample_canonical_request_using_u8_body() {
-        let datetime = chrono::Utc::now();
+        let datetime = OffsetDateTime::now_utc();
         let url: &str = "https://hi.s3.us-east-1.amazonaws.com/Prod/graphql";
         let map: HeaderMap = HeaderMap::new();
         let aws_sign = AwsSign::new(
@@ -268,7 +277,7 @@ mod tests {
 
     #[test]
     fn sample_canonical_request_using_vec_body() {
-        let datetime = chrono::Utc::now();
+        let datetime = OffsetDateTime::now_utc();
         let url: &str = "https://hi.s3.us-east-1.amazonaws.com/Prod/graphql";
         let map: HeaderMap = HeaderMap::new();
         let body = Vec::new();
